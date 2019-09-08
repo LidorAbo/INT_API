@@ -1,92 +1,135 @@
-  
+//@Library('Utilities') _
+import groovy.json.JsonSlurper
+import hudson.model.*
 def BuildVersion
+def Current_version
+def NextVersion
+def dev_rep_docker = 'lidorabo/docker_repo'
+def colons = ':'
+def module = 'intapi'
+def underscore = '_'
+def path_json_file
+def int_api_folder = 'INT_API'
+def release_folder = 'Release'
+pipeline {
 
- pipeline {
-   options {
-      timeout(time: 30, unit: 'MINUTES')def BuildVersion
-
-   }
-  environment {
-    registry = "dockerhubuser/repo"
-    registryCredential = 'dockerhub'
-    dockerImage = ''
-  }
-    agent {
-        label 'master'
+    options {
+        timeout(time: 30, unit: 'MINUTES')
     }
+    agent { label 'slave' }
     stages {
-        stage ('Checkout') {
+        stage('Checkout') {
             steps {
                 script {
-                    deleteDir()
-                    checkout([$class: 'GitSCM', branches: [[name: '*/rozana']], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[url: 'https://github.com/DevOpsINT/Course.git']]])def BuildVersion
+                    node('master') {
+                        dir(release_folder) {
+                            deleteDir()
+                            checkout([$class: 'GitSCM', branches: [[name: 'master']], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'git-cred', url: "https://github.com/lidorabo/Release.git"]]])
+                            path_json_file = sh(script: "pwd", returnStdout: true).trim() + '/' + 'dev' + '.json'
+                            Current_version = Return_Json_From_File("$path_json_file").Services.INT_API
 
-            			       		CurrentGitVersion = sh script:"git tag | sort -r | head -1", returnStdout: true
-                        CurrentGitVersion = CurrentGitVersion.trim()
-                        echo("CurrentGitVersion Is: ${CurrentGitVersion}")
-                        CurrentCommitIdShort = sh script:"git rev-parse HEAD | cut -c1-10", returnStdout: true
-                        echo("CurrentCommitIdShort Is: ${CurrentCommitIdShort}")
-                        BuildVersion = "${CurrentGitVersion}_${CurrentCommitIdShort}"
-                        BuildVersion = BuildVersion.trim()
-                        echo("BuildVersion Is: ${BuildVersion}")
+                        }
+                    }
+                        dir(int_api_folder) {
+                            deleteDir()
+                            checkout([$class: 'GitSCM', branches: [[name: 'master']], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'git-cred', url: "https://github.com/lidorabo/INT_API.git"]]])
+                            Commit_Id = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
+                            BuildVersion = Current_version + '_' + Commit_Id
+                            last_digit_current_version = sh(script: "echo $Current_version | cut -d'.' -f3", returnStdout: true).trim()
+                            NextVersion = sh(script: "echo $Current_version | cut -d. -f1", returnStdout: true).trim() + '.' + sh(script: "echo $Current_version |cut -d'.' -f2", returnStdout: true).trim() + '.' + (Integer.parseInt(last_digit_current_version) + 1)
+
+                        }
+
 
                 }
             }
         }
-        stage ('Unit Test') {
+        stage('Build') {
             steps {
                 script {
-                    dir ('./testDevdir/') {
+                    dir(int_api_folder) {
                         try {
-                            sh ''
-                            sh ''
-                            echo("..")
-                        } catch (err) {
-                            println("...")
-                            currentBuild.result = 'UNSTABLE'
+                            sh "sudo docker build . -t $module$colons$BuildVersion"
+                            println("The build image is successfully")
+
                         }
-                      sh 'pwd'
-                      sh 'ls'
+                        catch (exception) {
+                            println "The image build is failed"
+                            currentBuild.result = 'FAILURE'
+                            throw exception
+                        }
+
+                    }
+
+                }
+
+
+            }
+        }
+        stage('Push image to repository'){
+            steps{
+                script{
+                    try{
+                        withCredentials([usernamePassword(credentialsId: 'docker-cred', passwordVariable: 'DOCKER_PASSWORD', usernameVariable: 'DOCKER_USERNAME')]) {
+                            sh "sudo docker login -u=${DOCKER_USERNAME} -p=${DOCKER_PASSWORD}"
+                            sh "sudo docker tag $module$colons$BuildVersion $dev_rep_docker$colons$module$underscore$NextVersion"
+                            sh "sudo docker push $dev_rep_docker$colons$module$underscore$NextVersion"
+
+                        }
+                    }
+                    catch (exception){
+                        println "The image pushing to dockehub  failed"
+                        currentBuild.result = 'FAILURE'
+                        throw exception
                     }
                 }
             }
         }
-
-           stage ('build') {
-            steps {
-                script {
-                        try {
-                            sh ''
-                            sh ''
-                            echo("..")
-                        } catch (err) {
-                            println("...")
-                            currentBuild.result = 'UNSTABLE'
+        stage('Update version in release file'){
+            steps{
+                script{
+                    node('master'){
+                        dir(release_folder){
+                            withCredentials([usernamePassword(credentialsId: 'git-cred', passwordVariable: 'GIT_PASSWORD', usernameVariable: 'GIT_USERNAME')]) {
+                                sh """
+                            git config --global user.name "LidorAbo"
+                            git config --global user.email "lidorabo2@gmail.com"                         
+                            sed -i  -r 's/("INT_API")(\\s+\\:\\s+)(.*)/\\1\\2"$NextVersion"/' $path_json_file
+                            git add .
+                            git commit -m "next version of INT_API is updated to $NextVersion in dev.json file"
+                            git push  https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/lidorabo/Release.git HEAD:master 
+                            """
+                            }
                         }
-                //  sh 'pwd'
-                //  sh 'ls'
-                    
+                    }
+                   
+
                 }
             }
         }
-
-                  stage ('sanity_test') {
-            steps {
-                script {
-                        try {
-                            sh ''
-                            sh ''
-                            echo("..")
-                        } catch (err) {
-                            println("...")
-                            currentBuild.result = 'UNSTABLE'
+        stage('Pushing tag to master branch'){
+            steps{
+                script{
+                    node('master'){
+                        dir('INT_API'){
+                            withCredentials([usernamePassword(credentialsId: 'git-cred', passwordVariable: 'GIT_PASSWORD', usernameVariable: 'GIT_USERNAME')]) {
+                                sh """
+                         git config --global user.name "LidorAbo"
+                         git config --global user.email "Lidorabo2@gmail.com"
+                         git tag -d \$(git tag -l) > /dev/null
+                         git tag -a $NextVersion -m "Tag for release version of INT_API module"
+                         git push  https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/lidorabo/INT_API.git $NextVersion
+                            """
+                            }
                         }
-                   //   sh 'pwd'
-                  //  sh 'ls'
-                    
+                        
+                    }
                 }
             }
+            }
         }
-        
+
     }
+def Return_Json_From_File(file_name){
+    return new JsonSlurper().parse(new File(file_name))
 }
